@@ -1,8 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 
-import 'package:flutter/foundation.dart';
-import 'package:flutter/painting.dart';
+import 'package:flutter/widgets.dart';
 
 import 'flutter_memory_monitor_platform_interface.dart';
 import 'src/memory_models.dart';
@@ -38,7 +37,7 @@ abstract class MemoryReporter {
 ///
 /// 负责采集 Flutter 图片缓存、Dart RSS、原生平台内存，并根据配置识别高内存、
 /// 内存暴涨、页面/场景退出后不回落等第一版线上可观测问题。
-class FlutterMemoryMonitor {
+class FlutterMemoryMonitor with WidgetsBindingObserver {
   /// 创建内存监控器。
   FlutterMemoryMonitor({
     FlutterMemoryMonitorPlatform? platform,
@@ -58,14 +57,22 @@ class FlutterMemoryMonitor {
   MemoryMonitorConfig _config = const MemoryMonitorConfig();
   MemoryReporter? _reporter;
   MemoryContextProvider? _contextProvider;
-  Timer? _timer;
+  Timer? _periodicTimer;
   StreamSubscription<MemoryPressureEvent>? _pressureSubscription;
+  final Set<Timer> _retainedCheckTimers = <Timer>{};
   MemorySnapshot? _previousSnapshot;
+  DateTime? _lastDetailedPlatformSnapshotAt;
+  bool _isRunning = false;
+  bool _isSampling = false;
+  bool _isForeground = true;
+  bool _observingLifecycle = false;
+  String _appState = 'foreground';
+  int _memoryPressureCount = 0;
   final List<MemorySnapshot> _recentSnapshots = <MemorySnapshot>[];
   final Map<String, MemorySnapshot> _routeBaselines =
       <String, MemorySnapshot>{};
-  final Map<String, MemorySnapshot> _sceneBaselines =
-      <String, MemorySnapshot>{};
+  final Map<String, _SceneMemoryState> _sceneStates =
+      <String, _SceneMemoryState>{};
   final List<String> _routeStack = <String>[];
   final Set<String> _activeScenes = <String>{};
 
@@ -98,15 +105,15 @@ class FlutterMemoryMonitor {
     MemoryContextProvider? contextProvider,
   }) {
     stop();
+    _isRunning = true;
     _reporter = reporter;
     _config = config;
     _contextProvider = contextProvider;
+    _updateLifecycleState(WidgetsBinding.instance.lifecycleState);
+    WidgetsBinding.instance.addObserver(this);
+    _observingLifecycle = true;
 
-    if (config.foregroundInterval > Duration.zero) {
-      _timer = Timer.periodic(config.foregroundInterval, (_) {
-        unawaited(getSnapshot(reason: MemorySampleReason.periodic));
-      });
-    }
+    _restartPeriodicTimer();
 
     _pressureSubscription = _platform.memoryPressureEvents.listen(
       (MemoryPressureEvent event) {
@@ -118,12 +125,38 @@ class FlutterMemoryMonitor {
     );
   }
 
-  /// 停止周期采样和系统内存压力监听。
+  /// 停止周期采样、延迟检查和系统内存压力监听。
   void stop() {
-    _timer?.cancel();
-    _timer = null;
+    _isRunning = false;
+    _periodicTimer?.cancel();
+    _periodicTimer = null;
+    for (final Timer timer in _retainedCheckTimers) {
+      timer.cancel();
+    }
+    _retainedCheckTimers.clear();
     unawaited(_pressureSubscription?.cancel());
     _pressureSubscription = null;
+    if (_observingLifecycle) {
+      WidgetsBinding.instance.removeObserver(this);
+      _observingLifecycle = false;
+    }
+    _isSampling = false;
+    _reporter = null;
+    _contextProvider = null;
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    _updateLifecycleState(state);
+    _restartPeriodicTimer();
+    if (!_isRunning) {
+      return;
+    }
+    if (state == AppLifecycleState.resumed) {
+      unawaited(
+        _collectAutomaticSnapshot(reason: MemorySampleReason.foreground),
+      );
+    }
   }
 
   /// 立即采集一条内存快照。
@@ -186,7 +219,7 @@ class FlutterMemoryMonitor {
       reason: MemorySampleReason.sceneStart,
       context: <String, Object?>{...context, 'scene_name': sceneName},
     );
-    _sceneBaselines[sceneName] = snapshot;
+    _sceneStates[sceneName] = _SceneMemoryState(snapshot);
     return snapshot;
   }
 
@@ -195,30 +228,42 @@ class FlutterMemoryMonitor {
     String sceneName, {
     Map<String, Object?> context = const <String, Object?>{},
   }) async {
-    _activeScenes.remove(sceneName);
     final MemorySnapshot snapshot = await _collectSnapshot(
       reason: MemorySampleReason.sceneEnd,
       context: <String, Object?>{...context, 'scene_name': sceneName},
     );
-    final MemorySnapshot? baseline = _sceneBaselines.remove(sceneName);
-    if (baseline != null) {
+    _activeScenes.remove(sceneName);
+    final _SceneMemoryState? sceneState = _sceneStates.remove(sceneName);
+    if (sceneState != null) {
       await _scheduleRetainedCheck(
-        baseline: baseline,
+        baseline: sceneState.baselineSnapshot,
         reason: MemorySampleReason.sceneEndAfterDelay,
         issueType: MemoryIssueType.sceneMemoryRetained,
         thresholdBytes: _config.sceneRetainedThresholdBytes,
         delay: _config.sceneEndDelay,
-        context: <String, Object?>{...context, 'scene_name': sceneName},
+        context: <String, Object?>{
+          ...context,
+          'scene_name': sceneName,
+          ...sceneState.toContext(snapshot),
+        },
       );
     }
     return snapshot;
   }
 
   Future<void> _handleMemoryPressure(MemoryPressureEvent event) async {
-    final MemorySnapshot snapshot = await _collectSnapshot(
+    _memoryPressureCount += 1;
+    for (final _SceneMemoryState state in _sceneStates.values) {
+      state.memoryPressureCount += 1;
+    }
+    final MemorySnapshot? snapshot = await _collectAutomaticSnapshot(
       reason: MemorySampleReason.systemMemoryPressure,
       context: <String, Object?>{'memory_pressure': event.toMap()},
+      allowDetailedPlatformSnapshot: false,
     );
+    if (snapshot == null) {
+      return;
+    }
     await _reportIssue(
       MemoryIssue(
         type: MemoryIssueType.systemMemoryPressure,
@@ -232,14 +277,16 @@ class FlutterMemoryMonitor {
   Future<MemorySnapshot> _collectSnapshot({
     required String reason,
     required Map<String, Object?> context,
+    bool allowDetailedPlatformSnapshot = true,
   }) async {
+    final DateTime now = _nowProvider();
     final PlatformMemorySnapshot? platformSnapshot =
-        await _platform.getMemorySnapshot();
+        await _readPlatformSnapshot(allowDetailedPlatformSnapshot);
     final MemorySnapshot snapshot = MemorySnapshot(
-      timestampMs: _nowProvider().millisecondsSinceEpoch,
+      timestampMs: now.millisecondsSinceEpoch,
       reason: reason,
-      rssBytes: _rssReader(),
-      imageCache: _imageCacheReader(),
+      rssBytes: _readRssSafely(),
+      imageCache: _readImageCacheSafely(),
       platform: platformSnapshot,
       context: _mergeContext(context),
     );
@@ -247,6 +294,7 @@ class FlutterMemoryMonitor {
     final MemorySnapshot? previous = _previousSnapshot;
     _rememberSnapshot(snapshot);
     _previousSnapshot = snapshot;
+    _updateActiveSceneStats(snapshot);
 
     if (_config.reportNormalSnapshots) {
       await _reportSnapshot(snapshot);
@@ -255,10 +303,87 @@ class FlutterMemoryMonitor {
     return snapshot;
   }
 
+  Future<MemorySnapshot?> _collectAutomaticSnapshot({
+    required String reason,
+    Map<String, Object?> context = const <String, Object?>{},
+    bool allowDetailedPlatformSnapshot = true,
+  }) async {
+    // 自动采样使用串行保护：如果上一次还没完成，直接跳过本次，避免堆积导致卡顿。
+    if (!_isRunning || _isSampling) {
+      return null;
+    }
+    _isSampling = true;
+    try {
+      return await _collectSnapshot(
+        reason: reason,
+        context: context,
+        allowDetailedPlatformSnapshot: allowDetailedPlatformSnapshot,
+      );
+    } catch (error) {
+      debugPrint('flutter_memory_monitor auto snapshot failed: $error');
+      return null;
+    } finally {
+      _isSampling = false;
+    }
+  }
+
+  Future<PlatformMemorySnapshot?> _readPlatformSnapshot(
+    bool allowDetailedPlatformSnapshot,
+  ) async {
+    final bool useDetailed =
+        allowDetailedPlatformSnapshot &&
+        _shouldCollectDetailedPlatformSnapshot();
+    try {
+      final Future<PlatformMemorySnapshot?> future =
+          useDetailed
+              ? _platform.getDetailedMemorySnapshot()
+              : _platform.getMemorySnapshot();
+      return await future.timeout(_config.platformSnapshotTimeout);
+    } catch (error) {
+      debugPrint('flutter_memory_monitor platform snapshot failed: $error');
+      if (!useDetailed) {
+        return null;
+      }
+      try {
+        return await _platform.getMemorySnapshot().timeout(
+          _config.platformSnapshotTimeout,
+        );
+      } catch (fallbackError) {
+        debugPrint(
+          'flutter_memory_monitor light platform snapshot failed: $fallbackError',
+        );
+        return null;
+      }
+    }
+  }
+
+  bool _shouldCollectDetailedPlatformSnapshot() {
+    if (!_config.collectDetailedPlatformSnapshot) {
+      return false;
+    }
+    final DateTime now = _nowProvider();
+    final DateTime? last = _lastDetailedPlatformSnapshotAt;
+    final Duration interval = _config.effectiveDetailedPlatformSnapshotInterval;
+    if (last != null && now.difference(last) < interval) {
+      return false;
+    }
+    // 先更新时间再发起详细采样，避免详细采样失败时下一次自动采样立刻重试。
+    _lastDetailedPlatformSnapshotAt = now;
+    return true;
+  }
+
   Map<String, Object?> _mergeContext(Map<String, Object?> context) {
+    Map<String, Object?> providerContext = const <String, Object?>{};
+    try {
+      providerContext = _contextProvider?.call() ?? const <String, Object?>{};
+    } catch (error) {
+      debugPrint('flutter_memory_monitor contextProvider failed: $error');
+    }
     return <String, Object?>{
-      if (_contextProvider != null) ..._contextProvider!(),
+      ...providerContext,
       ...context,
+      'app_state': _appState,
+      'memory_pressure_count': _memoryPressureCount,
       if (_routeStack.isNotEmpty) 'route_stack': List<String>.of(_routeStack),
       if (_activeScenes.isNotEmpty)
         'active_scenes': List<String>.of(_activeScenes),
@@ -274,6 +399,12 @@ class FlutterMemoryMonitor {
     _recentSnapshots.add(snapshot);
     while (_recentSnapshots.length > max) {
       _recentSnapshots.removeAt(0);
+    }
+  }
+
+  void _updateActiveSceneStats(MemorySnapshot snapshot) {
+    for (final _SceneMemoryState state in _sceneStates.values) {
+      state.record(snapshot);
     }
   }
 
@@ -305,6 +436,8 @@ class FlutterMemoryMonitor {
         context: <String, Object?>{
           'threshold_bytes': threshold,
           'ram_bucket': snapshot.ramBucket,
+          'device_tier': snapshot.deviceTier,
+          'mem_level': snapshot.memLevel,
         },
       ),
     );
@@ -370,6 +503,9 @@ class FlutterMemoryMonitor {
   }) async {
     // 测试和极短场景使用 zero delay 时直接 await，避免异步检查不可控。
     if (delay <= Duration.zero) {
+      if (!_isRunning) {
+        return;
+      }
       await _checkRetainedMemory(
         baseline: baseline,
         reason: reason,
@@ -380,17 +516,23 @@ class FlutterMemoryMonitor {
       return;
     }
 
-    unawaited(
-      Future<void>.delayed(delay, () {
-        return _checkRetainedMemory(
+    late final Timer timer;
+    timer = Timer(delay, () {
+      _retainedCheckTimers.remove(timer);
+      if (!_isRunning) {
+        return;
+      }
+      unawaited(
+        _checkRetainedMemory(
           baseline: baseline,
           reason: reason,
           issueType: issueType,
           thresholdBytes: thresholdBytes,
           context: context,
-        );
-      }),
-    );
+        ),
+      );
+    });
+    _retainedCheckTimers.add(timer);
   }
 
   Future<void> _checkRetainedMemory({
@@ -400,6 +542,9 @@ class FlutterMemoryMonitor {
     required int thresholdBytes,
     required Map<String, Object?> context,
   }) async {
+    if (!_isRunning) {
+      return;
+    }
     final MemorySnapshot snapshot = await _collectSnapshot(
       reason: reason,
       context: context,
@@ -430,6 +575,29 @@ class FlutterMemoryMonitor {
     );
   }
 
+  void _restartPeriodicTimer() {
+    _periodicTimer?.cancel();
+    _periodicTimer = null;
+    if (!_isRunning) {
+      return;
+    }
+    if (_config.pausePeriodicSamplingInBackground && !_isForeground) {
+      return;
+    }
+    final Duration interval = _config.effectiveForegroundInterval;
+    if (interval <= Duration.zero) {
+      return;
+    }
+    _periodicTimer = Timer.periodic(interval, (_) {
+      unawaited(_collectAutomaticSnapshot(reason: MemorySampleReason.periodic));
+    });
+  }
+
+  void _updateLifecycleState(AppLifecycleState? state) {
+    _isForeground = state == null || state == AppLifecycleState.resumed;
+    _appState = _isForeground ? 'foreground' : 'background';
+  }
+
   Future<void> _reportSnapshot(MemorySnapshot snapshot) async {
     final MemoryReporter? reporter = _reporter;
     if (reporter == null) {
@@ -456,6 +624,24 @@ class FlutterMemoryMonitor {
       debugPrint('flutter_memory_monitor reportIssue failed: $error');
     }
   }
+
+  int? _readRssSafely() {
+    try {
+      return _rssReader();
+    } catch (error) {
+      debugPrint('flutter_memory_monitor rss read failed: $error');
+      return null;
+    }
+  }
+
+  ImageCacheMetrics _readImageCacheSafely() {
+    try {
+      return _imageCacheReader();
+    } catch (error) {
+      debugPrint('flutter_memory_monitor image cache read failed: $error');
+      return ImageCacheMetrics.empty;
+    }
+  }
 }
 
 int? _readCurrentRss() {
@@ -472,4 +658,40 @@ ImageCacheMetrics _readImageCacheMetrics() {
     maximumSizeBytes: cache.maximumSizeBytes,
     maximumSize: cache.maximumSize,
   );
+}
+
+class _SceneMemoryState {
+  _SceneMemoryState(this.baselineSnapshot)
+    : peakSnapshot = baselineSnapshot,
+      peakMemoryBytes = baselineSnapshot.primaryMemoryBytes;
+
+  final MemorySnapshot baselineSnapshot;
+  MemorySnapshot peakSnapshot;
+  int? peakMemoryBytes;
+  int memoryPressureCount = 0;
+
+  void record(MemorySnapshot snapshot) {
+    final int? memory = snapshot.primaryMemoryBytes;
+    if (memory == null) {
+      return;
+    }
+    final int? currentPeak = peakMemoryBytes;
+    if (currentPeak == null || memory > currentPeak) {
+      peakMemoryBytes = memory;
+      peakSnapshot = snapshot;
+    }
+  }
+
+  Map<String, Object?> toContext(MemorySnapshot endSnapshot) {
+    final int? startMemory = baselineSnapshot.primaryMemoryBytes;
+    final int? endMemory = endSnapshot.primaryMemoryBytes;
+    return <String, Object?>{
+      if (startMemory != null) 'scene_start_memory_bytes': startMemory,
+      if (endMemory != null) 'scene_end_memory_bytes': endMemory,
+      if (peakMemoryBytes != null) 'scene_peak_memory_bytes': peakMemoryBytes,
+      if (startMemory != null && endMemory != null)
+        'scene_delta_bytes': endMemory - startMemory,
+      'scene_memory_pressure_count': memoryPressureCount,
+    };
+  }
 }

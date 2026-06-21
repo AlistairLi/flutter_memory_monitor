@@ -29,9 +29,16 @@ abstract class FlutterMemoryMonitorPlatform extends PlatformInterface {
     throw UnimplementedError('platformVersion() has not been implemented.');
   }
 
-  /// 获取原生平台侧内存快照。
+  /// 获取原生平台侧轻量内存快照。
   Future<PlatformMemorySnapshot?> getMemorySnapshot() {
     throw UnimplementedError('getMemorySnapshot() has not been implemented.');
+  }
+
+  /// 获取原生平台侧详细内存快照。
+  ///
+  /// Android 详细快照可能调用 `Debug.getMemoryInfo()`，必须低频、后台线程执行。
+  Future<PlatformMemorySnapshot?> getDetailedMemorySnapshot() {
+    return getMemorySnapshot();
   }
 
   /// 系统内存压力事件流。

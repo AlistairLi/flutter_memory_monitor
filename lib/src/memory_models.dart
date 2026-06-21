@@ -30,6 +30,12 @@ class MemorySampleReason {
 
   /// 系统内存压力回调触发采样。
   static const String systemMemoryPressure = 'system_memory_pressure';
+
+  /// App 回到前台触发采样。
+  static const String foreground = 'foreground';
+
+  /// App 进入后台触发采样。
+  static const String background = 'background';
 }
 
 /// 内存异常类型常量。
@@ -67,6 +73,23 @@ class MemoryRamBucket {
 
   /// 无法识别设备总内存时使用。
   static const String unknown = 'unknown';
+}
+
+/// 内存水位常量。
+class MemoryLevel {
+  MemoryLevel._();
+
+  /// 无法计算内存水位。
+  static const String unknown = 'unknown';
+
+  /// 常规水位。
+  static const String normal = 'normal';
+
+  /// 较高水位，需要关注。
+  static const String high = 'high';
+
+  /// 危险水位，需要重点排查 OOM 风险。
+  static const String critical = 'critical';
 }
 
 /// Flutter 图片缓存指标。
@@ -127,6 +150,7 @@ class PlatformMemorySnapshot {
   /// 创建一条原生平台内存快照。
   const PlatformMemorySnapshot({
     this.platform,
+    this.collectionLevel,
     this.androidTotalPssBytes,
     this.androidDalvikPssBytes,
     this.androidNativePssBytes,
@@ -143,6 +167,9 @@ class PlatformMemorySnapshot {
 
   /// 平台名称，例如 android 或 ios。
   final String? platform;
+
+  /// 平台采样级别：`light` 表示低成本快照，`detailed` 表示包含 PSS 等详细字段。
+  final String? collectionLevel;
 
   /// Android PSS 总量，系统视角下更接近 App 实际占用。
   final int? androidTotalPssBytes;
@@ -184,6 +211,7 @@ class PlatformMemorySnapshot {
   factory PlatformMemorySnapshot.fromMap(Map<dynamic, dynamic> map) {
     return PlatformMemorySnapshot(
       platform: _asString(map['platform']),
+      collectionLevel: _asString(map['collection_level']),
       androidTotalPssBytes: _asInt(map['android_total_pss_bytes']),
       androidDalvikPssBytes: _asInt(map['android_dalvik_pss_bytes']),
       androidNativePssBytes: _asInt(map['android_native_pss_bytes']),
@@ -222,10 +250,33 @@ class PlatformMemorySnapshot {
     return MemoryRamBucket.high;
   }
 
+  /// 设备档位别名，方便与业务看板字段保持一致。
+  String get deviceTier {
+    return ramBucket;
+  }
+
+  /// 根据主内存和设备总内存计算内存水位。
+  String get memLevel {
+    final int? memory = primaryMemoryBytes;
+    final int? total = deviceTotalMemoryBytes;
+    if (memory == null || memory <= 0 || total == null || total <= 0) {
+      return MemoryLevel.unknown;
+    }
+    final double ratio = memory / total;
+    if (ratio >= 0.65) {
+      return MemoryLevel.critical;
+    }
+    if (ratio >= 0.45) {
+      return MemoryLevel.high;
+    }
+    return MemoryLevel.normal;
+  }
+
   /// 转为可直接上报的 Map。
   Map<String, Object?> toMap() {
     return <String, Object?>{
       if (platform != null) 'platform': platform,
+      if (collectionLevel != null) 'collection_level': collectionLevel,
       if (androidTotalPssBytes != null)
         'android_total_pss_bytes': androidTotalPssBytes,
       if (androidDalvikPssBytes != null)
@@ -245,6 +296,9 @@ class PlatformMemorySnapshot {
       if (deviceTotalMemoryBytes != null)
         'device_total_memory_bytes': deviceTotalMemoryBytes,
       if (systemLowMemory != null) 'system_low_memory': systemLowMemory,
+      'ram_bucket': ramBucket,
+      'device_tier': deviceTier,
+      'mem_level': memLevel,
     };
   }
 }
@@ -289,6 +343,16 @@ class MemorySnapshot {
     return platform?.ramBucket ?? MemoryRamBucket.unknown;
   }
 
+  /// 设备档位别名，方便业务埋点沿用 `device_tier` 字段。
+  String get deviceTier {
+    return platform?.deviceTier ?? MemoryRamBucket.unknown;
+  }
+
+  /// 当前内存水位。
+  String get memLevel {
+    return platform?.memLevel ?? MemoryLevel.unknown;
+  }
+
   /// 设备总内存。
   int? get deviceTotalMemoryBytes {
     return platform?.deviceTotalMemoryBytes;
@@ -302,6 +366,9 @@ class MemorySnapshot {
       if (rssBytes != null) 'rss_bytes': rssBytes,
       ...imageCache.toMap(),
       if (platform != null) 'platform_memory': platform!.toMap(),
+      'ram_bucket': ramBucket,
+      'device_tier': deviceTier,
+      'mem_level': memLevel,
       if (context.isNotEmpty) 'context': context,
     };
   }

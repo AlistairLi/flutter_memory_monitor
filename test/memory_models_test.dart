@@ -6,15 +6,18 @@ void main() {
     final PlatformMemorySnapshot snapshot =
         PlatformMemorySnapshot.fromMap(<String, Object?>{
           'platform': 'ios',
+          'collection_level': 'light',
           'ios_phys_footprint_bytes': 300,
           'ios_resident_size_bytes': 200,
-          'device_total_memory_bytes': 4 * 1024 * 1024 * 1024,
+          'device_total_memory_bytes': 600,
           'system_low_memory': false,
         });
 
     expect(snapshot.platform, 'ios');
+    expect(snapshot.collectionLevel, 'light');
     expect(snapshot.primaryMemoryBytes, 300);
-    expect(snapshot.ramBucket, MemoryRamBucket.mid);
+    expect(snapshot.memLevel, MemoryLevel.high);
+    expect(snapshot.ramBucket, MemoryRamBucket.low);
     expect(snapshot.toMap()['ios_phys_footprint_bytes'], 300);
   });
 
@@ -45,5 +48,20 @@ void main() {
     expect(map['image_cache_bytes'], 10);
     expect(snapshot.primaryMemoryBytes, 200);
     expect(map['context'], <String, Object?>{'route_name': 'home'});
+  });
+
+  test('MemoryMonitorConfig clamps sampling intervals', () {
+    const MemoryMonitorConfig config = MemoryMonitorConfig(
+      foregroundInterval: Duration(seconds: 5),
+      minForegroundInterval: Duration(seconds: 60),
+      detailedPlatformSnapshotInterval: Duration(seconds: 10),
+      minDetailedPlatformSnapshotInterval: Duration(minutes: 2),
+    );
+
+    expect(config.effectiveForegroundInterval, const Duration(seconds: 60));
+    expect(
+      config.effectiveDetailedPlatformSnapshotInterval,
+      const Duration(minutes: 2),
+    );
   });
 }

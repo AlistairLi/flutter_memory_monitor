@@ -26,6 +26,8 @@ public class FlutterMemoryMonitorPlugin: NSObject, FlutterPlugin, FlutterStreamH
       result("iOS " + UIDevice.current.systemVersion)
     case "getMemorySnapshot":
       result(buildMemorySnapshot())
+    case "getDetailedMemorySnapshot":
+      result(buildMemorySnapshot())
     default:
       result(FlutterMethodNotImplemented)
     }
@@ -34,6 +36,10 @@ public class FlutterMemoryMonitorPlugin: NSObject, FlutterPlugin, FlutterStreamH
   /// Dart 开始监听 iOS memory warning。
   public func onListen(withArguments arguments: Any?, eventSink events: @escaping FlutterEventSink) -> FlutterError? {
     eventSink = events
+    if let observer = memoryWarningObserver {
+      NotificationCenter.default.removeObserver(observer)
+      memoryWarningObserver = nil
+    }
     memoryWarningObserver = NotificationCenter.default.addObserver(
       forName: UIApplication.didReceiveMemoryWarningNotification,
       object: nil,
@@ -77,9 +83,15 @@ public class FlutterMemoryMonitorPlugin: NSObject, FlutterPlugin, FlutterStreamH
 
     return [
       "platform": "ios",
-      "ios_phys_footprint_bytes": UInt64(info.phys_footprint),
-      "ios_resident_size_bytes": UInt64(info.resident_size),
-      "device_total_memory_bytes": ProcessInfo.processInfo.physicalMemory
+      "collection_level": "light",
+      "ios_phys_footprint_bytes": toInt64(info.phys_footprint),
+      "ios_resident_size_bytes": toInt64(info.resident_size),
+      "device_total_memory_bytes": toInt64(ProcessInfo.processInfo.physicalMemory)
     ]
+  }
+
+  /// MethodChannel 标准 codec 对 UInt64 不稳定，统一压到 Int64 范围内回传。
+  private func toInt64(_ value: UInt64) -> Int64 {
+    return value > UInt64(Int64.max) ? Int64.max : Int64(value)
   }
 }
