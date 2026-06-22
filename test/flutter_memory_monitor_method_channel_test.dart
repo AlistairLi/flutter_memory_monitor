@@ -19,15 +19,12 @@ void main() {
             case 'getMemorySnapshot':
               return <String, Object?>{
                 'platform': 'android',
-                'collection_level': 'light',
-                'device_total_memory_bytes': 8 * 1024 * 1024 * 1024,
-              };
-            case 'getDetailedMemorySnapshot':
-              return <String, Object?>{
-                'platform': 'android',
-                'collection_level': 'detailed',
                 'android_total_pss_bytes': 1024,
                 'android_native_pss_bytes': 512,
+                'java_heap_used_bytes': 128 * 1024 * 1024,
+                'java_heap_max_bytes': 512 * 1024 * 1024,
+                'android_memory_class_bytes': 512 * 1024 * 1024,
+                'android_large_memory_class_bytes': 1024 * 1024 * 1024,
                 'device_total_memory_bytes': 8 * 1024 * 1024 * 1024,
               };
           }
@@ -49,18 +46,6 @@ void main() {
 
     expect(snapshot, isNotNull);
     expect(snapshot!.platform, 'android');
-    expect(snapshot.collectionLevel, 'light');
-    expect(snapshot.androidTotalPssBytes, isNull);
-    expect(snapshot.ramBucket, MemoryRamBucket.high);
-  });
-
-  test('getDetailedMemorySnapshot', () async {
-    final PlatformMemorySnapshot? snapshot =
-        await platform.getDetailedMemorySnapshot();
-
-    expect(snapshot, isNotNull);
-    expect(snapshot!.platform, 'android');
-    expect(snapshot.collectionLevel, 'detailed');
     expect(snapshot.androidTotalPssBytes, 1024);
     expect(snapshot.androidNativePssBytes, 512);
     expect(snapshot.ramBucket, MemoryRamBucket.high);

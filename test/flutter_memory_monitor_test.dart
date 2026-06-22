@@ -11,24 +11,22 @@ class FakeFlutterMemoryMonitorPlatform
     implements FlutterMemoryMonitorPlatform {
   FakeFlutterMemoryMonitorPlatform({
     this.snapshots = const <PlatformMemorySnapshot?>[],
-    this.detailedSnapshots = const <PlatformMemorySnapshot?>[],
     this.throwOnSnapshot = false,
   });
 
   final List<PlatformMemorySnapshot?> snapshots;
-  final List<PlatformMemorySnapshot?> detailedSnapshots;
   final bool throwOnSnapshot;
   final StreamController<MemoryPressureEvent> pressureController =
       StreamController<MemoryPressureEvent>.broadcast();
   int snapshotIndex = 0;
-  int detailedSnapshotIndex = 0;
-  int detailedSnapshotCallCount = 0;
+  int snapshotCallCount = 0;
 
   @override
   Future<String?> getPlatformVersion() => Future.value('42');
 
   @override
   Future<PlatformMemorySnapshot?> getMemorySnapshot() async {
+    snapshotCallCount += 1;
     if (throwOnSnapshot) {
       throw StateError('snapshot failed');
     }
@@ -39,20 +37,6 @@ class FakeFlutterMemoryMonitorPlatform
         snapshotIndex < snapshots.length ? snapshotIndex : snapshots.length - 1;
     snapshotIndex += 1;
     return snapshots[index];
-  }
-
-  @override
-  Future<PlatformMemorySnapshot?> getDetailedMemorySnapshot() async {
-    detailedSnapshotCallCount += 1;
-    if (detailedSnapshots.isEmpty) {
-      return getMemorySnapshot();
-    }
-    final int index =
-        detailedSnapshotIndex < detailedSnapshots.length
-            ? detailedSnapshotIndex
-            : detailedSnapshots.length - 1;
-    detailedSnapshotIndex += 1;
-    return detailedSnapshots[index];
   }
 
   @override
@@ -237,11 +221,6 @@ void main() {
                 androidTotalPssBytes: 120,
                 deviceTotalMemoryBytes: 10 * 1024 * 1024 * 1024,
               ),
-              PlatformMemorySnapshot(
-                platform: 'android',
-                androidTotalPssBytes: 140,
-                deviceTotalMemoryBytes: 10 * 1024 * 1024 * 1024,
-              ),
             ],
           );
       final RecordingMemoryReporter reporter = RecordingMemoryReporter();
@@ -260,6 +239,7 @@ void main() {
       await monitor.markRouteExit('HomePage');
 
       expect(monitor.routeStack, isEmpty);
+      expect(fakePlatform.snapshotCallCount, 2);
       expect(
         reporter.issues.map((MemoryIssue issue) => issue.type),
         contains(MemoryIssueType.routeMemoryRetained),
@@ -307,7 +287,7 @@ void main() {
   });
 
   test(
-    'uses detailed platform snapshot only after configured interval',
+    'uses platform snapshot for every collection',
     () async {
       DateTime now = DateTime.fromMillisecondsSinceEpoch(0);
       final FakeFlutterMemoryMonitorPlatform fakePlatform =
@@ -315,15 +295,12 @@ void main() {
             snapshots: const <PlatformMemorySnapshot?>[
               PlatformMemorySnapshot(
                 platform: 'android',
-                collectionLevel: 'light',
+                androidTotalPssBytes: 100,
                 deviceTotalMemoryBytes: 10 * 1024 * 1024 * 1024,
               ),
-            ],
-            detailedSnapshots: const <PlatformMemorySnapshot?>[
               PlatformMemorySnapshot(
                 platform: 'android',
-                collectionLevel: 'detailed',
-                androidTotalPssBytes: 100,
+                androidTotalPssBytes: 120,
                 deviceTotalMemoryBytes: 10 * 1024 * 1024 * 1024,
               ),
             ],
@@ -341,18 +318,64 @@ void main() {
         config: const MemoryMonitorConfig(
           foregroundInterval: Duration.zero,
           reportNormalSnapshots: false,
-          collectDetailedPlatformSnapshot: true,
-          detailedPlatformSnapshotInterval: Duration(seconds: 10),
-          minDetailedPlatformSnapshotInterval: Duration(seconds: 10),
         ),
       );
       final MemorySnapshot first = await monitor.getSnapshot();
       now = now.add(const Duration(seconds: 5));
       final MemorySnapshot second = await monitor.getSnapshot();
 
-      expect(first.platform?.collectionLevel, 'detailed');
-      expect(second.platform?.collectionLevel, 'light');
-      expect(fakePlatform.detailedSnapshotCallCount, 1);
+      expect(first.platform?.androidTotalPssBytes, 100);
+      expect(second.platform?.androidTotalPssBytes, 120);
+      expect(fakePlatform.snapshotCallCount, 2);
+      monitor.stop();
+      await fakePlatform.close();
+    },
+  );
+
+  test(
+    'does not report memory spike when memory signal source changes',
+    () async {
+      final FakeFlutterMemoryMonitorPlatform fakePlatform =
+          FakeFlutterMemoryMonitorPlatform(
+            snapshots: const <PlatformMemorySnapshot?>[
+              PlatformMemorySnapshot(
+                platform: 'android',
+              ),
+              PlatformMemorySnapshot(
+                platform: 'android',
+                androidTotalPssBytes: 300,
+                deviceTotalMemoryBytes: 10 * 1024 * 1024 * 1024,
+              ),
+            ],
+          );
+      final RecordingMemoryReporter reporter = RecordingMemoryReporter();
+      int rssBytes = 100;
+      final FlutterMemoryMonitor monitor = FlutterMemoryMonitor(
+        platform: fakePlatform,
+        nowProvider: () => DateTime.fromMillisecondsSinceEpoch(1000),
+        rssReader: () => rssBytes,
+        imageCacheReader: () => ImageCacheMetrics.empty,
+      );
+
+      monitor.start(
+        reporter: reporter,
+        config: const MemoryMonitorConfig(
+          foregroundInterval: Duration.zero,
+          reportNormalSnapshots: false,
+          memorySpikeThresholdBytes: 50,
+          memorySpikeThresholdRatio: 0.2,
+        ),
+      );
+      await monitor.getSnapshot();
+      rssBytes = 120;
+      await monitor.getSnapshot();
+
+      expect(
+        reporter.issues.where(
+          (MemoryIssue issue) => issue.type == MemoryIssueType.memorySpike,
+        ),
+        isEmpty,
+      );
       monitor.stop();
       await fakePlatform.close();
     },

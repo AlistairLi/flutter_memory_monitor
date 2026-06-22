@@ -12,10 +12,9 @@ class MemoryMonitorConfig {
     this.reportNormalSnapshots = true,
     this.reportIssueImmediately = true,
     this.pausePeriodicSamplingInBackground = true,
-    this.collectDetailedPlatformSnapshot = false,
-    this.detailedPlatformSnapshotInterval = const Duration(minutes: 2),
-    this.minDetailedPlatformSnapshotInterval = const Duration(minutes: 2),
+    this.collectRouteExitSnapshot = false,
     this.platformSnapshotTimeout = const Duration(seconds: 2),
+    this.issueReportCooldown = const Duration(minutes: 5),
     this.memorySpikeThresholdBytes = 50 * 1024 * 1024,
     this.memorySpikeThresholdRatio = 0.2,
     this.routeRetainedThresholdBytes = 10 * 1024 * 1024,
@@ -52,20 +51,16 @@ class MemoryMonitorConfig {
   /// 是否在后台暂停周期采样。
   final bool pausePeriodicSamplingInBackground;
 
-  /// 是否允许采集包含 Android PSS 的详细平台快照。
+  /// 是否在页面退出瞬间采样。
   ///
-  /// Android 详细快照会调用 `Debug.getMemoryInfo()`，该 API 可能扫描 VMA 并触发
-  /// `libmeminfo.so` 慢调用，所以默认关闭，只建议灰度或专项诊断低频打开。
-  final bool collectDetailedPlatformSnapshot;
-
-  /// 详细平台快照采样间隔。
-  final Duration detailedPlatformSnapshotInterval;
-
-  /// 详细平台快照最小采样间隔。
-  final Duration minDetailedPlatformSnapshotInterval;
+  /// 默认关闭，页面级泄漏判断依赖 enter 基线和退出后延迟采样即可，避免一次跳转产生过多采样。
+  final bool collectRouteExitSnapshot;
 
   /// 平台通道采样超时时间，避免原生侧异常慢调用拖住 Dart 自动采样链路。
   final Duration platformSnapshotTimeout;
+
+  /// 同一异常类型的上报冷却时间，用于避免高内存或系统压力事件短时间刷屏。
+  final Duration issueReportCooldown;
 
   /// 单次内存增长的绝对阈值。
   final int memorySpikeThresholdBytes;
@@ -94,17 +89,5 @@ class MemoryMonitorConfig {
       return minForegroundInterval;
     }
     return foregroundInterval;
-  }
-
-  /// 生效的详细平台快照间隔。`Duration.zero` 表示每次允许检查。
-  Duration get effectiveDetailedPlatformSnapshotInterval {
-    if (detailedPlatformSnapshotInterval <= Duration.zero) {
-      return Duration.zero;
-    }
-    if (detailedPlatformSnapshotInterval <
-        minDetailedPlatformSnapshotInterval) {
-      return minDetailedPlatformSnapshotInterval;
-    }
-    return detailedPlatformSnapshotInterval;
   }
 }

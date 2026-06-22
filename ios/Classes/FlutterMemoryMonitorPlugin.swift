@@ -1,5 +1,6 @@
 import Flutter
 import UIKit
+import os
 
 /// Flutter 线上内存监控插件的 iOS 实现。
 public class FlutterMemoryMonitorPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
@@ -25,8 +26,6 @@ public class FlutterMemoryMonitorPlugin: NSObject, FlutterPlugin, FlutterStreamH
     case "getPlatformVersion":
       result("iOS " + UIDevice.current.systemVersion)
     case "getMemorySnapshot":
-      result(buildMemorySnapshot())
-    case "getDetailedMemorySnapshot":
       result(buildMemorySnapshot())
     default:
       result(FlutterMethodNotImplemented)
@@ -83,11 +82,24 @@ public class FlutterMemoryMonitorPlugin: NSObject, FlutterPlugin, FlutterStreamH
 
     return [
       "platform": "ios",
-      "collection_level": "light",
       "ios_phys_footprint_bytes": toInt64(info.phys_footprint),
       "ios_resident_size_bytes": toInt64(info.resident_size),
+      // os_proc_available_memory() 是系统给当前进程的动态可用内存估算，
+      // 读取成本低，不会触发 heap 遍历或对象扫描，适合线上周期采样。
+      // 它不是固定 jetsam 阈值，但能和 phys_footprint 一起判断 OOM 风险。
+      "ios_available_memory_for_process_bytes": availableMemoryForProcess(),
       "device_total_memory_bytes": toInt64(ProcessInfo.processInfo.physicalMemory)
     ]
+  }
+
+  /// 读取 iOS 当前进程估算还可继续申请的内存。
+  ///
+  /// os_proc_available_memory 从 iOS 13 开始可用；低版本返回 nil，避免破坏 iOS 12 兼容性。
+  private func availableMemoryForProcess() -> Int64? {
+    if #available(iOS 13.0, *) {
+      return toInt64(UInt64(os_proc_available_memory()))
+    }
+    return nil
   }
 
   /// MethodChannel 标准 codec 对 UInt64 不稳定，统一压到 Int64 范围内回传。

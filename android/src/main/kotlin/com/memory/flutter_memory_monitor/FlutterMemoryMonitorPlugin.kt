@@ -15,7 +15,6 @@ import io.flutter.plugin.common.MethodChannel.MethodCallHandler
 import io.flutter.plugin.common.MethodChannel.Result
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
-import java.util.concurrent.atomic.AtomicBoolean
 
 /** Flutter 线上内存监控插件的 Android 实现。 */
 class FlutterMemoryMonitorPlugin: FlutterPlugin, MethodCallHandler, EventChannel.StreamHandler, ComponentCallbacks2 {
@@ -37,9 +36,6 @@ class FlutterMemoryMonitorPlugin: FlutterPlugin, MethodCallHandler, EventChannel
   /// 主线程 Handler，用于把后台采样结果安全回传给 Flutter。
   private val mainHandler = Handler(Looper.getMainLooper())
 
-  /// 详细采样串行保护，避免多个 `Debug.getMemoryInfo()` 并发堆积。
-  private val detailedSnapshotInFlight = AtomicBoolean(false)
-
   /// Flutter engine 绑定时注册 MethodChannel、EventChannel 和系统回调。
   override fun onAttachedToEngine(flutterPluginBinding: FlutterPlugin.FlutterPluginBinding) {
     if (detailedExecutor.isShutdown) {
@@ -57,8 +53,7 @@ class FlutterMemoryMonitorPlugin: FlutterPlugin, MethodCallHandler, EventChannel
   override fun onMethodCall(call: MethodCall, result: Result) {
     when (call.method) {
       "getPlatformVersion" -> result.success("Android ${android.os.Build.VERSION.RELEASE}")
-      "getMemorySnapshot" -> result.success(buildLightMemorySnapshot())
-      "getDetailedMemorySnapshot" -> buildDetailedMemorySnapshotAsync(result)
+      "getMemorySnapshot" -> buildMemorySnapshotAsync(result)
       else -> result.notImplemented()
     }
   }
@@ -111,71 +106,78 @@ class FlutterMemoryMonitorPlugin: FlutterPlugin, MethodCallHandler, EventChannel
     // 插件只关心内存压力，配置变化无需处理。
   }
 
-  /// 采集 Android 低成本内存快照。
-  ///
-  /// 默认快照不调用 `Debug.getMemoryInfo()`，避免触发 `libmeminfo.so` 扫描 VMA 导致主线程卡顿或 ANR。
-  private fun buildLightMemorySnapshot(): Map<String, Any?> {
+  /// 采集 Android 基础内存快照。
+  private fun buildBaseMemorySnapshot(): Map<String, Any?> {
     val runtime = Runtime.getRuntime()
     val systemInfo = ActivityManager.MemoryInfo()
     val activityManager = applicationContext?.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
     activityManager?.getMemoryInfo(systemInfo)
 
+    // memoryClass/largeMemoryClass 是 ActivityManager 暴露的进程 heap 档位，
+    // 只是读取系统已维护的常量级信息，不会像 Debug.getMemoryInfo() 一样扫描 VMA，
+    // 因此可以放在基础字段中用于辅助判断 Java heap OOM 风险。
+    val memoryClassBytes = activityManager?.memoryClass?.toLong()?.times(1024L * 1024L)
+    val largeMemoryClassBytes = activityManager?.largeMemoryClass?.toLong()?.times(1024L * 1024L)
+
     return mapOf(
       "platform" to "android",
-      "collection_level" to "light",
       "java_heap_used_bytes" to runtime.totalMemory() - runtime.freeMemory(),
       "java_heap_max_bytes" to runtime.maxMemory(),
+      "android_memory_class_bytes" to memoryClassBytes,
+      "android_large_memory_class_bytes" to largeMemoryClassBytes,
       "system_available_memory_bytes" to if (activityManager != null) systemInfo.availMem else null,
       "device_total_memory_bytes" to if (activityManager != null) systemInfo.totalMem else null,
       "system_low_memory" to if (activityManager != null) systemInfo.lowMemory else null
     )
   }
 
-  /// 后台采集 Android 详细内存快照。
+  /// 后台采集 Android 内存快照。
   ///
-  /// 详细快照包含 PSS，需要调用 `Debug.getMemoryInfo()`。该调用在部分设备上可能很慢，
-  /// 因此只允许单线程低频执行，并且不会阻塞 Flutter platform thread。
-  private fun buildDetailedMemorySnapshotAsync(result: Result) {
-    if (!detailedSnapshotInFlight.compareAndSet(false, true)) {
-      result.success(
-        buildLightMemorySnapshot() + mapOf(
-          "detailed_snapshot_skipped" to "in_flight"
-        )
-      )
-      return
-    }
-
+  /// 快照包含 PSS 和 memoryStats，需要调用 `Debug.getMemoryInfo()`。
+  /// 原生侧统一放到单线程 Executor 中执行，不阻塞 Flutter platform thread。
+  private fun buildMemorySnapshotAsync(result: Result) {
     detailedExecutor.execute {
       try {
-        val snapshot = buildDetailedMemorySnapshot()
+        val snapshot = buildMemorySnapshot()
         mainHandler.post {
           result.success(snapshot)
         }
       } catch (throwable: Throwable) {
         mainHandler.post {
           result.success(
-            buildLightMemorySnapshot() + mapOf(
+            buildBaseMemorySnapshot() + mapOf(
               "detailed_snapshot_error" to (throwable.message ?: throwable.javaClass.simpleName)
             )
           )
         }
-      } finally {
-        detailedSnapshotInFlight.set(false)
       }
     }
   }
 
-  /// 实际执行详细采样。调用方必须保证不在主线程执行。
-  private fun buildDetailedMemorySnapshot(): Map<String, Any?> {
+  /// 实际执行内存采样。调用方必须保证不在主线程执行。
+  private fun buildMemorySnapshot(): Map<String, Any?> {
     val debugInfo = Debug.MemoryInfo()
     Debug.getMemoryInfo(debugInfo)
+    val memoryStats = debugInfo.memoryStats
 
-    return buildLightMemorySnapshot() + mapOf(
-      "collection_level" to "detailed",
+    return buildBaseMemorySnapshot() + mapOf(
       "android_total_pss_bytes" to debugInfo.totalPss * 1024L,
       "android_dalvik_pss_bytes" to debugInfo.dalvikPss * 1024L,
       "android_native_pss_bytes" to debugInfo.nativePss * 1024L,
-      "android_other_pss_bytes" to debugInfo.otherPss * 1024L
+      "android_other_pss_bytes" to debugInfo.otherPss * 1024L,
+      "android_summary_java_heap_bytes" to memoryStats.toBytes("summary.java-heap"),
+      "android_summary_native_heap_bytes" to memoryStats.toBytes("summary.native-heap"),
+      "android_summary_code_bytes" to memoryStats.toBytes("summary.code"),
+      "android_summary_stack_bytes" to memoryStats.toBytes("summary.stack"),
+      "android_summary_graphics_bytes" to memoryStats.toBytes("summary.graphics"),
+      "android_summary_private_other_bytes" to memoryStats.toBytes("summary.private-other"),
+      "android_summary_system_bytes" to memoryStats.toBytes("summary.system"),
+      "android_summary_total_swap_bytes" to memoryStats.toBytes("summary.total-swap")
     )
+  }
+
+  /// Debug.MemoryInfo.memoryStats 中的 summary 字段单位是 KB，统一转换成 bytes 回传 Dart。
+  private fun Map<String, String>.toBytes(key: String): Long? {
+    return this[key]?.toLongOrNull()?.times(1024L)
   }
 }

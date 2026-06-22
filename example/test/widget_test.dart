@@ -11,17 +11,17 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_memory_monitor_example/main.dart';
 
 void main() {
-  testWidgets('Verify Platform version', (WidgetTester tester) async {
+  testWidgets('shows image cache demo entry', (WidgetTester tester) async {
     // Build our app and trigger a frame.
     await tester.pumpWidget(const MyApp());
+    await tester.pump(const Duration(seconds: 3));
 
-    // Verify that platform version is retrieved.
-    expect(
-      find.byWidgetPredicate(
-        (Widget widget) => widget is Text &&
-                           widget.data!.startsWith('Running on:'),
-      ),
-      findsOneWidget,
-    );
+    expect(find.text('Memory monitor example'), findsOneWidget);
+    expect(find.text('进入图片缓存指标演示'), findsOneWidget);
+    expect(find.text('进入原生内存压力演示'), findsOneWidget);
+
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pump(const Duration(seconds: 3));
+    await tester.pump(const Duration(seconds: 3));
   });
 }

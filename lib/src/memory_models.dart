@@ -104,7 +104,7 @@ class ImageCacheMetrics {
     required this.maximumSize,
   });
 
-  /// 当前图片缓存字节数。
+  /// 当前图片缓存大小，单位 bytes。
   final int currentSizeBytes;
 
   /// 当前图片缓存条目数。
@@ -116,7 +116,7 @@ class ImageCacheMetrics {
   /// 正在解码或加载中的图片数量。
   final int pendingImageCount;
 
-  /// 图片缓存最大字节数。
+  /// 图片缓存最大大小，单位 bytes。
   final int maximumSizeBytes;
 
   /// 图片缓存最大条目数。
@@ -150,13 +150,23 @@ class PlatformMemorySnapshot {
   /// 创建一条原生平台内存快照。
   const PlatformMemorySnapshot({
     this.platform,
-    this.collectionLevel,
     this.androidTotalPssBytes,
     this.androidDalvikPssBytes,
     this.androidNativePssBytes,
     this.androidOtherPssBytes,
+    this.androidSummaryJavaHeapBytes,
+    this.androidSummaryNativeHeapBytes,
+    this.androidSummaryCodeBytes,
+    this.androidSummaryStackBytes,
+    this.androidSummaryGraphicsBytes,
+    this.androidSummaryPrivateOtherBytes,
+    this.androidSummarySystemBytes,
+    this.androidSummaryTotalSwapBytes,
+    this.androidMemoryClassBytes,
+    this.androidLargeMemoryClassBytes,
     this.iosPhysFootprintBytes,
     this.iosResidentSizeBytes,
+    this.iosAvailableMemoryForProcessBytes,
     this.javaHeapUsedBytes,
     this.javaHeapMaxBytes,
     this.systemAvailableMemoryBytes,
@@ -168,37 +178,75 @@ class PlatformMemorySnapshot {
   /// 平台名称，例如 android 或 ios。
   final String? platform;
 
-  /// 平台采样级别：`light` 表示低成本快照，`detailed` 表示包含 PSS 等详细字段。
-  final String? collectionLevel;
-
-  /// Android PSS 总量，系统视角下更接近 App 实际占用。
+  /// Android PSS 总量，系统视角下更接近 App 实际占用，单位 bytes。
   final int? androidTotalPssBytes;
 
-  /// Android Dalvik/ART 相关 PSS。
+  /// Android Dalvik/ART 相关 PSS，单位 bytes。
   final int? androidDalvikPssBytes;
 
-  /// Android native PSS，用于观察图片、engine、插件和音视频等占用。
+  /// Android native PSS，用于观察图片、engine、插件和音视频等占用，单位 bytes。
   final int? androidNativePssBytes;
 
-  /// Android 其他 PSS。
+  /// Android 其他 PSS，单位 bytes。
   final int? androidOtherPssBytes;
 
-  /// iOS phys_footprint，优先用于判断 iOS 内存压力。
+  /// Android Java heap summary，占用单位 bytes。
+  final int? androidSummaryJavaHeapBytes;
+
+  /// Android native heap summary，占用单位 bytes。
+  final int? androidSummaryNativeHeapBytes;
+
+  /// Android 代码段、dex、so、art 等 code summary，占用单位 bytes。
+  final int? androidSummaryCodeBytes;
+
+  /// Android 线程栈 summary，占用单位 bytes。
+  final int? androidSummaryStackBytes;
+
+  /// Android graphics summary，占用单位 bytes。
+  final int? androidSummaryGraphicsBytes;
+
+  /// Android private other summary，占用单位 bytes。
+  final int? androidSummaryPrivateOtherBytes;
+
+  /// Android system summary，占用单位 bytes。
+  final int? androidSummarySystemBytes;
+
+  /// Android total swap summary，占用单位 bytes。
+  final int? androidSummaryTotalSwapBytes;
+
+  /// Android 普通进程 Java heap 档位上限。
+  ///
+  /// 来自 `ActivityManager.memoryClass`，用于理解系统给 App 的常规 heap 档位，单位 bytes。
+  final int? androidMemoryClassBytes;
+
+  /// Android largeHeap 进程 Java heap 档位上限。
+  ///
+  /// 来自 `ActivityManager.largeMemoryClass`，只表示声明 largeHeap 后的 heap 档位，
+  /// 不代表 native、图片、Flutter engine 等全部进程内存都能用到这个上限，单位 bytes。
+  final int? androidLargeMemoryClassBytes;
+
+  /// iOS phys_footprint，优先用于判断 iOS 内存压力，单位 bytes。
   final int? iosPhysFootprintBytes;
 
-  /// iOS resident size，作为辅助观察指标。
+  /// iOS resident size，作为辅助观察指标，单位 bytes。
   final int? iosResidentSizeBytes;
 
-  /// Android Java heap 当前使用量。
+  /// iOS 当前进程估算还可继续申请的内存。
+  ///
+  /// 来自 `os_proc_available_memory()`。这是系统按当前压力给出的动态估算，
+  /// 不是固定 jetsam 阈值，但适合和 `ios_phys_footprint_bytes` 一起判断 OOM 风险，单位 bytes。
+  final int? iosAvailableMemoryForProcessBytes;
+
+  /// Android Java heap 当前使用量，单位 bytes。
   final int? javaHeapUsedBytes;
 
-  /// Android Java heap 上限。
+  /// Android Java heap 上限，单位 bytes。
   final int? javaHeapMaxBytes;
 
-  /// 系统当前可用内存。
+  /// 系统当前可用内存，单位 bytes。
   final int? systemAvailableMemoryBytes;
 
-  /// 设备总内存，用于 RAM 分档和阈值归一化。
+  /// 设备总内存，用于 RAM 分档和阈值归一化，单位 bytes。
   final int? deviceTotalMemoryBytes;
 
   /// 系统是否已处于低内存状态。
@@ -211,13 +259,37 @@ class PlatformMemorySnapshot {
   factory PlatformMemorySnapshot.fromMap(Map<dynamic, dynamic> map) {
     return PlatformMemorySnapshot(
       platform: _asString(map['platform']),
-      collectionLevel: _asString(map['collection_level']),
       androidTotalPssBytes: _asInt(map['android_total_pss_bytes']),
       androidDalvikPssBytes: _asInt(map['android_dalvik_pss_bytes']),
       androidNativePssBytes: _asInt(map['android_native_pss_bytes']),
       androidOtherPssBytes: _asInt(map['android_other_pss_bytes']),
+      androidSummaryJavaHeapBytes: _asInt(
+        map['android_summary_java_heap_bytes'],
+      ),
+      androidSummaryNativeHeapBytes: _asInt(
+        map['android_summary_native_heap_bytes'],
+      ),
+      androidSummaryCodeBytes: _asInt(map['android_summary_code_bytes']),
+      androidSummaryStackBytes: _asInt(map['android_summary_stack_bytes']),
+      androidSummaryGraphicsBytes: _asInt(
+        map['android_summary_graphics_bytes'],
+      ),
+      androidSummaryPrivateOtherBytes: _asInt(
+        map['android_summary_private_other_bytes'],
+      ),
+      androidSummarySystemBytes: _asInt(map['android_summary_system_bytes']),
+      androidSummaryTotalSwapBytes: _asInt(
+        map['android_summary_total_swap_bytes'],
+      ),
+      androidMemoryClassBytes: _asInt(map['android_memory_class_bytes']),
+      androidLargeMemoryClassBytes: _asInt(
+        map['android_large_memory_class_bytes'],
+      ),
       iosPhysFootprintBytes: _asInt(map['ios_phys_footprint_bytes']),
       iosResidentSizeBytes: _asInt(map['ios_resident_size_bytes']),
+      iosAvailableMemoryForProcessBytes: _asInt(
+        map['ios_available_memory_for_process_bytes'],
+      ),
       javaHeapUsedBytes: _asInt(map['java_heap_used_bytes']),
       javaHeapMaxBytes: _asInt(map['java_heap_max_bytes']),
       systemAvailableMemoryBytes: _asInt(map['system_available_memory_bytes']),
@@ -227,11 +299,39 @@ class PlatformMemorySnapshot {
     );
   }
 
-  /// 当前平台最值得用来判断线上压力的主内存指标。
+  /// 当前平台最值得用来判断线上压力的主内存指标，单位 bytes。
   int? get primaryMemoryBytes {
     return androidTotalPssBytes ??
         iosPhysFootprintBytes ??
         iosResidentSizeBytes;
+  }
+
+  /// 当前平台可用于辅助判断 OOM 风险的 App 内存上限，单位 bytes。
+  ///
+  /// Android 优先返回 Java heap 硬上限；iOS 返回当前 footprint 加动态可用内存。
+  /// 该字段是风险判断辅助值，不应理解为跨平台完全等价的“进程总内存上限”。
+  int? get appMemoryLimitBytes {
+    if (javaHeapMaxBytes != null) {
+      return javaHeapMaxBytes;
+    }
+    final int? iosFootprint = iosPhysFootprintBytes;
+    final int? iosAvailable = iosAvailableMemoryForProcessBytes;
+    if (iosFootprint != null && iosAvailable != null) {
+      return iosFootprint + iosAvailable;
+    }
+    return androidMemoryClassBytes;
+  }
+
+  /// 当前平台估算的 App 剩余可用内存，单位 bytes。
+  ///
+  /// Android 这里只计算 Java heap 剩余；iOS 使用系统返回的动态可用内存估算。
+  int? get appAvailableMemoryBytes {
+    final int? javaMax = javaHeapMaxBytes;
+    final int? javaUsed = javaHeapUsedBytes;
+    if (javaMax != null && javaUsed != null) {
+      return javaMax - javaUsed;
+    }
+    return iosAvailableMemoryForProcessBytes;
   }
 
   /// 根据设备总内存计算 RAM 档位。
@@ -276,7 +376,6 @@ class PlatformMemorySnapshot {
   Map<String, Object?> toMap() {
     return <String, Object?>{
       if (platform != null) 'platform': platform,
-      if (collectionLevel != null) 'collection_level': collectionLevel,
       if (androidTotalPssBytes != null)
         'android_total_pss_bytes': androidTotalPssBytes,
       if (androidDalvikPssBytes != null)
@@ -285,12 +384,40 @@ class PlatformMemorySnapshot {
         'android_native_pss_bytes': androidNativePssBytes,
       if (androidOtherPssBytes != null)
         'android_other_pss_bytes': androidOtherPssBytes,
+      if (androidSummaryJavaHeapBytes != null)
+        'android_summary_java_heap_bytes': androidSummaryJavaHeapBytes,
+      if (androidSummaryNativeHeapBytes != null)
+        'android_summary_native_heap_bytes': androidSummaryNativeHeapBytes,
+      if (androidSummaryCodeBytes != null)
+        'android_summary_code_bytes': androidSummaryCodeBytes,
+      if (androidSummaryStackBytes != null)
+        'android_summary_stack_bytes': androidSummaryStackBytes,
+      if (androidSummaryGraphicsBytes != null)
+        'android_summary_graphics_bytes': androidSummaryGraphicsBytes,
+      if (androidSummaryPrivateOtherBytes != null)
+        'android_summary_private_other_bytes':
+            androidSummaryPrivateOtherBytes,
+      if (androidSummarySystemBytes != null)
+        'android_summary_system_bytes': androidSummarySystemBytes,
+      if (androidSummaryTotalSwapBytes != null)
+        'android_summary_total_swap_bytes': androidSummaryTotalSwapBytes,
+      if (androidMemoryClassBytes != null)
+        'android_memory_class_bytes': androidMemoryClassBytes,
+      if (androidLargeMemoryClassBytes != null)
+        'android_large_memory_class_bytes': androidLargeMemoryClassBytes,
       if (iosPhysFootprintBytes != null)
         'ios_phys_footprint_bytes': iosPhysFootprintBytes,
       if (iosResidentSizeBytes != null)
         'ios_resident_size_bytes': iosResidentSizeBytes,
+      if (iosAvailableMemoryForProcessBytes != null)
+        'ios_available_memory_for_process_bytes':
+            iosAvailableMemoryForProcessBytes,
       if (javaHeapUsedBytes != null) 'java_heap_used_bytes': javaHeapUsedBytes,
       if (javaHeapMaxBytes != null) 'java_heap_max_bytes': javaHeapMaxBytes,
+      if (appMemoryLimitBytes != null)
+        'app_memory_limit_bytes': appMemoryLimitBytes,
+      if (appAvailableMemoryBytes != null)
+        'app_available_memory_bytes': appAvailableMemoryBytes,
       if (systemAvailableMemoryBytes != null)
         'system_available_memory_bytes': systemAvailableMemoryBytes,
       if (deviceTotalMemoryBytes != null)
@@ -321,7 +448,7 @@ class MemorySnapshot {
   /// 采样触发原因。
   final String reason;
 
-  /// Dart `ProcessInfo.currentRss` 返回的进程常驻内存。
+  /// Dart `ProcessInfo.currentRss` 返回的进程常驻内存，单位 bytes。
   final int? rssBytes;
 
   /// Flutter 图片缓存指标。
@@ -333,7 +460,7 @@ class MemorySnapshot {
   /// 业务上下文，例如 route、scene、app version、设备分桶等。
   final Map<String, Object?> context;
 
-  /// 当前最适合判断内存压力的主指标。
+  /// 当前最适合判断内存压力的主指标，单位 bytes。
   int? get primaryMemoryBytes {
     return platform?.primaryMemoryBytes ?? rssBytes;
   }
@@ -353,9 +480,19 @@ class MemorySnapshot {
     return platform?.memLevel ?? MemoryLevel.unknown;
   }
 
-  /// 设备总内存。
+  /// 设备总内存，单位 bytes。
   int? get deviceTotalMemoryBytes {
     return platform?.deviceTotalMemoryBytes;
+  }
+
+  /// 当前平台可用于辅助判断 OOM 风险的 App 内存上限，单位 bytes。
+  int? get appMemoryLimitBytes {
+    return platform?.appMemoryLimitBytes;
+  }
+
+  /// 当前平台估算的 App 剩余可用内存，单位 bytes。
+  int? get appAvailableMemoryBytes {
+    return platform?.appAvailableMemoryBytes;
   }
 
   /// 转为可直接上报的 Map。
@@ -366,6 +503,10 @@ class MemorySnapshot {
       if (rssBytes != null) 'rss_bytes': rssBytes,
       ...imageCache.toMap(),
       if (platform != null) 'platform_memory': platform!.toMap(),
+      if (appMemoryLimitBytes != null)
+        'app_memory_limit_bytes': appMemoryLimitBytes,
+      if (appAvailableMemoryBytes != null)
+        'app_available_memory_bytes': appAvailableMemoryBytes,
       'ram_bucket': ramBucket,
       'device_tier': deviceTier,
       'mem_level': memLevel,
@@ -442,7 +583,7 @@ class MemoryIssue {
   /// 用于对比的基线快照，例如页面进入时的内存。
   final MemorySnapshot? baselineSnapshot;
 
-  /// 当前快照相对基线或上一次快照的增长量。
+  /// 当前快照相对基线或上一次快照的增长量，单位 bytes。
   final int? deltaBytes;
 
   /// 异常附加上下文。

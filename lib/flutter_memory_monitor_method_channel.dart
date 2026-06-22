@@ -33,16 +33,6 @@ class MethodChannelFlutterMemoryMonitor extends FlutterMemoryMonitorPlatform {
   }
 
   @override
-  Future<PlatformMemorySnapshot?> getDetailedMemorySnapshot() async {
-    final Map<dynamic, dynamic>? result = await methodChannel
-        .invokeMapMethod<dynamic, dynamic>('getDetailedMemorySnapshot');
-    if (result == null) {
-      return null;
-    }
-    return PlatformMemorySnapshot.fromMap(result);
-  }
-
-  @override
   Stream<MemoryPressureEvent> get memoryPressureEvents {
     return eventChannel
         .receiveBroadcastStream()

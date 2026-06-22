@@ -61,13 +61,14 @@ class FlutterMemoryMonitor with WidgetsBindingObserver {
   StreamSubscription<MemoryPressureEvent>? _pressureSubscription;
   final Set<Timer> _retainedCheckTimers = <Timer>{};
   MemorySnapshot? _previousSnapshot;
-  DateTime? _lastDetailedPlatformSnapshotAt;
   bool _isRunning = false;
   bool _isSampling = false;
   bool _isForeground = true;
   bool _observingLifecycle = false;
   String _appState = 'foreground';
   int _memoryPressureCount = 0;
+  final Map<String, DateTime> _lastIssueReportedAtByType =
+      <String, DateTime>{};
   final List<MemorySnapshot> _recentSnapshots = <MemorySnapshot>[];
   final Map<String, MemorySnapshot> _routeBaselines =
       <String, MemorySnapshot>{};
@@ -143,6 +144,7 @@ class FlutterMemoryMonitor with WidgetsBindingObserver {
     _isSampling = false;
     _reporter = null;
     _contextProvider = null;
+    _lastIssueReportedAtByType.clear();
   }
 
   @override
@@ -191,11 +193,16 @@ class FlutterMemoryMonitor with WidgetsBindingObserver {
       _routeStack.removeAt(index);
     }
 
-    final MemorySnapshot snapshot = await _collectSnapshot(
-      reason: MemorySampleReason.routeExit,
-      context: <String, Object?>{...context, 'route_name': routeName},
-    );
     final MemorySnapshot? baseline = _routeBaselines.remove(routeName);
+    late final MemorySnapshot snapshot;
+    if (_config.collectRouteExitSnapshot || baseline == null) {
+      snapshot = await _collectSnapshot(
+        reason: MemorySampleReason.routeExit,
+        context: <String, Object?>{...context, 'route_name': routeName},
+      );
+    } else {
+      snapshot = baseline;
+    }
     if (baseline != null) {
       await _scheduleRetainedCheck(
         baseline: baseline,
@@ -259,7 +266,6 @@ class FlutterMemoryMonitor with WidgetsBindingObserver {
     final MemorySnapshot? snapshot = await _collectAutomaticSnapshot(
       reason: MemorySampleReason.systemMemoryPressure,
       context: <String, Object?>{'memory_pressure': event.toMap()},
-      allowDetailedPlatformSnapshot: false,
     );
     if (snapshot == null) {
       return;
@@ -277,11 +283,10 @@ class FlutterMemoryMonitor with WidgetsBindingObserver {
   Future<MemorySnapshot> _collectSnapshot({
     required String reason,
     required Map<String, Object?> context,
-    bool allowDetailedPlatformSnapshot = true,
   }) async {
     final DateTime now = _nowProvider();
     final PlatformMemorySnapshot? platformSnapshot =
-        await _readPlatformSnapshot(allowDetailedPlatformSnapshot);
+        await _readPlatformSnapshot();
     final MemorySnapshot snapshot = MemorySnapshot(
       timestampMs: now.millisecondsSinceEpoch,
       reason: reason,
@@ -306,7 +311,6 @@ class FlutterMemoryMonitor with WidgetsBindingObserver {
   Future<MemorySnapshot?> _collectAutomaticSnapshot({
     required String reason,
     Map<String, Object?> context = const <String, Object?>{},
-    bool allowDetailedPlatformSnapshot = true,
   }) async {
     // 自动采样使用串行保护：如果上一次还没完成，直接跳过本次，避免堆积导致卡顿。
     if (!_isRunning || _isSampling) {
@@ -317,7 +321,6 @@ class FlutterMemoryMonitor with WidgetsBindingObserver {
       return await _collectSnapshot(
         reason: reason,
         context: context,
-        allowDetailedPlatformSnapshot: allowDetailedPlatformSnapshot,
       );
     } catch (error) {
       debugPrint('flutter_memory_monitor auto snapshot failed: $error');
@@ -327,49 +330,15 @@ class FlutterMemoryMonitor with WidgetsBindingObserver {
     }
   }
 
-  Future<PlatformMemorySnapshot?> _readPlatformSnapshot(
-    bool allowDetailedPlatformSnapshot,
-  ) async {
-    final bool useDetailed =
-        allowDetailedPlatformSnapshot &&
-        _shouldCollectDetailedPlatformSnapshot();
+  Future<PlatformMemorySnapshot?> _readPlatformSnapshot() async {
     try {
-      final Future<PlatformMemorySnapshot?> future =
-          useDetailed
-              ? _platform.getDetailedMemorySnapshot()
-              : _platform.getMemorySnapshot();
-      return await future.timeout(_config.platformSnapshotTimeout);
+      return await _platform
+          .getMemorySnapshot()
+          .timeout(_config.platformSnapshotTimeout);
     } catch (error) {
       debugPrint('flutter_memory_monitor platform snapshot failed: $error');
-      if (!useDetailed) {
-        return null;
-      }
-      try {
-        return await _platform.getMemorySnapshot().timeout(
-          _config.platformSnapshotTimeout,
-        );
-      } catch (fallbackError) {
-        debugPrint(
-          'flutter_memory_monitor light platform snapshot failed: $fallbackError',
-        );
-        return null;
-      }
+      return null;
     }
-  }
-
-  bool _shouldCollectDetailedPlatformSnapshot() {
-    if (!_config.collectDetailedPlatformSnapshot) {
-      return false;
-    }
-    final DateTime now = _nowProvider();
-    final DateTime? last = _lastDetailedPlatformSnapshotAt;
-    final Duration interval = _config.effectiveDetailedPlatformSnapshotInterval;
-    if (last != null && now.difference(last) < interval) {
-      return false;
-    }
-    // 先更新时间再发起详细采样，避免详细采样失败时下一次自动采样立刻重试。
-    _lastDetailedPlatformSnapshotAt = now;
-    return true;
   }
 
   Map<String, Object?> _mergeContext(Map<String, Object?> context) {
@@ -462,16 +431,17 @@ class FlutterMemoryMonitor with WidgetsBindingObserver {
     MemorySnapshot snapshot,
     MemorySnapshot previous,
   ) async {
-    final int? currentMemory = snapshot.primaryMemoryBytes;
-    final int? previousMemory = previous.primaryMemoryBytes;
-    if (currentMemory == null ||
-        previousMemory == null ||
-        previousMemory <= 0) {
+    final _MemorySignal? current = _memorySignal(snapshot);
+    final _MemorySignal? previousSignal = _memorySignal(previous);
+    if (current == null ||
+        previousSignal == null ||
+        current.source != previousSignal.source ||
+        previousSignal.bytes <= 0) {
       return;
     }
 
-    final int delta = currentMemory - previousMemory;
-    final double ratio = delta / previousMemory;
+    final int delta = current.bytes - previousSignal.bytes;
+    final double ratio = delta / previousSignal.bytes;
     if (delta < _config.memorySpikeThresholdBytes ||
         ratio < _config.memorySpikeThresholdRatio) {
       return;
@@ -485,12 +455,34 @@ class FlutterMemoryMonitor with WidgetsBindingObserver {
         baselineSnapshot: previous,
         deltaBytes: delta,
         context: <String, Object?>{
-          'previous_memory_bytes': previousMemory,
-          'current_memory_bytes': currentMemory,
+          'memory_signal_source': current.source,
+          'previous_memory_bytes': previousSignal.bytes,
+          'current_memory_bytes': current.bytes,
           'ratio': ratio,
         },
       ),
     );
+  }
+
+  _MemorySignal? _memorySignal(MemorySnapshot snapshot) {
+    final PlatformMemorySnapshot? platform = snapshot.platform;
+    final int? androidPss = platform?.androidTotalPssBytes;
+    if (androidPss != null) {
+      return _MemorySignal('android_total_pss_bytes', androidPss);
+    }
+    final int? iosFootprint = platform?.iosPhysFootprintBytes;
+    if (iosFootprint != null) {
+      return _MemorySignal('ios_phys_footprint_bytes', iosFootprint);
+    }
+    final int? iosResident = platform?.iosResidentSizeBytes;
+    if (iosResident != null) {
+      return _MemorySignal('ios_resident_size_bytes', iosResident);
+    }
+    final int? rss = snapshot.rssBytes;
+    if (rss != null) {
+      return _MemorySignal('rss_bytes', rss);
+    }
+    return null;
   }
 
   Future<void> _scheduleRetainedCheck({
@@ -549,13 +541,15 @@ class FlutterMemoryMonitor with WidgetsBindingObserver {
       reason: reason,
       context: context,
     );
-    final int? currentMemory = snapshot.primaryMemoryBytes;
-    final int? baselineMemory = baseline.primaryMemoryBytes;
-    if (currentMemory == null || baselineMemory == null) {
+    final _MemorySignal? current = _memorySignal(snapshot);
+    final _MemorySignal? baselineSignal = _memorySignal(baseline);
+    if (current == null ||
+        baselineSignal == null ||
+        current.source != baselineSignal.source) {
       return;
     }
 
-    final int delta = currentMemory - baselineMemory;
+    final int delta = current.bytes - baselineSignal.bytes;
     if (delta <= thresholdBytes) {
       return;
     }
@@ -569,6 +563,7 @@ class FlutterMemoryMonitor with WidgetsBindingObserver {
         deltaBytes: delta,
         context: <String, Object?>{
           ...context,
+          'memory_signal_source': current.source,
           'threshold_bytes': thresholdBytes,
         },
       ),
@@ -614,15 +609,33 @@ class FlutterMemoryMonitor with WidgetsBindingObserver {
     if (!_config.reportIssueImmediately) {
       return;
     }
+    if (_isIssueInCooldown(issue)) {
+      return;
+    }
     final MemoryReporter? reporter = _reporter;
     if (reporter == null) {
       return;
     }
     try {
       await reporter.reportIssue(issue);
+      _lastIssueReportedAtByType[issue.type] =
+          DateTime.fromMillisecondsSinceEpoch(issue.timestampMs);
     } catch (error) {
       debugPrint('flutter_memory_monitor reportIssue failed: $error');
     }
+  }
+
+  bool _isIssueInCooldown(MemoryIssue issue) {
+    final Duration cooldown = _config.issueReportCooldown;
+    if (cooldown <= Duration.zero) {
+      return false;
+    }
+    final DateTime issueTime = DateTime.fromMillisecondsSinceEpoch(
+      issue.timestampMs,
+    );
+    final DateTime? lastReportedAt = _lastIssueReportedAtByType[issue.type];
+    return lastReportedAt != null &&
+        issueTime.difference(lastReportedAt) < cooldown;
   }
 
   int? _readRssSafely() {
@@ -642,6 +655,13 @@ class FlutterMemoryMonitor with WidgetsBindingObserver {
       return ImageCacheMetrics.empty;
     }
   }
+}
+
+class _MemorySignal {
+  const _MemorySignal(this.source, this.bytes);
+
+  final String source;
+  final int bytes;
 }
 
 int? _readCurrentRss() {

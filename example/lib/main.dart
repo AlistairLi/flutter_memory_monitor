@@ -3,6 +3,9 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_memory_monitor/flutter_memory_monitor.dart';
 
+import 'image_cache_demo_page.dart';
+import 'native_memory_pressure_demo_page.dart';
+
 void main() {
   runApp(const MyApp());
 }
@@ -45,11 +48,10 @@ class _MyAppState extends State<MyApp> {
         onSnapshot: _handleSnapshot,
         onIssue: _handleIssue,
       ),
-      contextProvider:
-          () => <String, Object?>{
-            'app_version': 'example',
-            'user_bucket': 'demo',
-          },
+      contextProvider: () => <String, Object?>{
+        'app_version': 'example',
+        'user_bucket': 'demo',
+      },
     );
     unawaited(_monitor.markRouteEnter('ExampleHome'));
   }
@@ -134,6 +136,38 @@ class _MyAppState extends State<MyApp> {
               OutlinedButton(
                 onPressed: _toggleRoomScene,
                 child: Text(_roomActive ? '结束语聊房场景' : '开始语聊房场景'),
+              ),
+              const SizedBox(height: 8),
+              Builder(
+                builder: (context) {
+                  return OutlinedButton(
+                    onPressed: () {
+                      Navigator.of(context).push(
+                        MaterialPageRoute<void>(
+                          builder: (BuildContext context) =>
+                              ImageCacheDemoPage(monitor: _monitor),
+                        ),
+                      );
+                    },
+                    child: const Text('进入图片缓存指标演示'),
+                  );
+                },
+              ),
+              const SizedBox(height: 8),
+              Builder(
+                builder: (context) {
+                  return OutlinedButton(
+                    onPressed: () {
+                      Navigator.of(context).push(
+                        MaterialPageRoute<void>(
+                          builder: (BuildContext context) =>
+                              NativeMemoryPressureDemoPage(monitor: _monitor),
+                        ),
+                      );
+                    },
+                    child: const Text('进入原生内存压力演示'),
+                  );
+                },
               ),
               const SizedBox(height: 16),
               const Text('采样日志'),
