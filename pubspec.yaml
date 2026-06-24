@@ -1,6 +1,6 @@
 name: flutter_memory_monitor
 description: "A lightweight Flutter plugin for online memory snapshots, image cache metrics, and native memory pressure signals."
-version: 0.0.1
+version: 0.0.2
 homepage: https://github.com/AlistairLi/flutter_memory_monitor
 
 environment:
